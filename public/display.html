@@ -3,34 +3,60 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <title>Agent Display</title>
-    <link rel="stylesheet" href="/display.css?v=5">
+    <title>Hermes Status</title>
+    <link rel="stylesheet" href="/display.css?v=19">
   </head>
   <body>
-    <main class="display-shell">
-      <header class="display-header">
-        <span class="display-badge" id="displayConnection">LIVE</span>
-        <span class="display-model" id="displayModel">MODEL</span>
-        <span class="display-time" id="displayTime">--:--:--</span>
+    <main class="screen" id="screen" data-phase="IDLE">
+      <header class="topbar">
+        <span class="pill" id="displayConnection">LIVE</span>
+        <span class="model" id="displayModel">HERMES</span>
       </header>
 
-      <section class="display-status">
-        <p class="display-kicker" id="displayTone">READY</p>
-        <h1 class="display-title" id="displayStatus">IDLE</h1>
-        <p class="display-detail" id="displayDetail">Waiting for your next move.</p>
+      <section class="clock-block">
+        <time class="clock" id="displayTime">--:--</time>
+        <div class="date" id="displayDate">--月--日 周-</div>
       </section>
 
-      <section class="display-token">
-        <div class="display-token-head">
-          <span>TOKEN</span>
-          <span id="displayTokenValue">100%</span>
+      <section class="status-block">
+        <div class="pixel-agent" id="displayAvatar" aria-hidden="true">
+          <span class="pixel-shadow"></span>
+          <span class="pixel-sprite">
+            <i class="px antenna"></i>
+            <i class="px head"></i>
+            <i class="px ear left"></i>
+            <i class="px ear right"></i>
+            <i class="px eye left"></i>
+            <i class="px eye right"></i>
+            <i class="px blush left"></i>
+            <i class="px blush right"></i>
+            <i class="px mouth"></i>
+            <i class="px body"></i>
+            <i class="px arm left"></i>
+            <i class="px arm right"></i>
+            <i class="px foot left"></i>
+            <i class="px foot right"></i>
+            <i class="px bubble one"></i>
+            <i class="px bubble two"></i>
+          </span>
         </div>
-        <div class="display-token-track" aria-hidden="true">
-          <div class="display-token-fill" id="displayTokenFill"></div>
-        </div>
+        <div class="kicker" id="displayTone">摸鱼中</div>
+        <h1 class="status" id="displayStatus">待机摸鱼</h1>
+        <p class="detail" id="displayDetail">等你发话。</p>
       </section>
+
+      <section class="flow" aria-label="流程">
+        <span class="flow-line"><i id="flowFill"></i></span>
+        <ol>
+          <li id="stepIdle">待机</li>
+          <li id="stepThinking">思考</li>
+          <li id="stepRunning">干活</li>
+          <li id="stepDone">完成</li>
+        </ol>
+      </section>
+      <button class="skin-toggle" id="skinToggle" type="button" aria-label="切换像素小人">换装</button>
     </main>
 
-    <script src="/display.js?v=5"></script>
+    <script src="/display.js?v=19"></script>
   </body>
-  </html>
+</html>

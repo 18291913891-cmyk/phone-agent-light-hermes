@@ -5,10 +5,10 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const { URL } = require('url');
 require('./lib/load-env').loadEnvFile();
-const { createBindingManager } = require('./lib/agent-bindings');
+const { createBindingManager, writeLiveStateSnapshot } = require('./lib/agent-bindings');
 
 const host = process.env.HOST || '0.0.0.0';
-const port = Number(process.env.PORT || 8787);
+const port = Number(process.env.PORT || 8790);
 const publicDir = path.join(__dirname, 'public');
 
 const clients = new Set();
@@ -376,7 +376,8 @@ function parseCommand(raw) {
 }
 
 function serveStatic(res, pathname) {
-  const relativePath = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/g, '');
+  const defaultPage = process.env.DEFAULT_PAGE || 'display.html';
+  const relativePath = pathname === '/' ? defaultPage : pathname.replace(/^\/+/g, '');
   const filePath = path.join(publicDir, relativePath);
   const normalized = path.normalize(filePath);
 
@@ -675,7 +676,7 @@ const bindingManager = createBindingManager({
   getManualState: () => state,
   onStateChange: broadcast,
   initialBindingId: process.env.PHONE_AGENT_BINDING || 'manual',
-  pollIntervalMs: Number(process.env.PHONE_AGENT_POLL_MS || 1500)
+  pollIntervalMs: Number(process.env.PHONE_AGENT_POLL_MS || 300)
 });
 
 const server = http.createServer(async (req, res) => {
@@ -721,6 +722,23 @@ const server = http.createServer(async (req, res) => {
     res.write('data: ' + JSON.stringify(enrichState()) + '\n\n');
     clients.add(res);
     req.on('close', () => clients.delete(res));
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/hermes-state') {
+    try {
+      const body = await readBody(req);
+      const payload = body ? JSON.parse(body) : {};
+      const written = await writeLiveStateSnapshot(payload);
+      await bindingManager.refresh(true);
+      sendJson(res, 200, {
+        ok: true,
+        state: written,
+        current: enrichState()
+      });
+    } catch (error) {
+      sendJson(res, 400, { error: error.message || 'Bad request' });
+    }
     return;
   }
 

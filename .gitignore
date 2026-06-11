@@ -41,3 +41,7 @@ current_view.png
 focus_landscape_right.png
 focus_view*.png
 landscape_test.png
+
+# Local Windows startup helpers with machine-specific paths
+start-phone-agent-light.bat
+start-phone-agent-light-hidden.vbs
