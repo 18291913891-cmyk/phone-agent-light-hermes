@@ -13,6 +13,7 @@ const liveStatePath = process.env.PHONE_AGENT_LIVE_STATE_PATH
 const target = process.env.AGENT_LIGHT_URL || 'http://127.0.0.1:8790';
 const pollMs = Number(process.env.HERMES_STATE_BRIDGE_POLL_MS || 200);
 const hookPriorityMs = Number(process.env.PHONE_AGENT_HOOK_PRIORITY_MS || 15000);
+const terminalPriorityMs = Number(process.env.PHONE_AGENT_TERMINAL_PRIORITY_MS || 30 * 1000);
 const replay = /^(1|true|yes|on)$/i.test(String(process.env.HERMES_STATE_BRIDGE_REPLAY || ''));
 
 const DEFAULT_TOKEN_BY_STATUS = {
@@ -26,6 +27,8 @@ const DEFAULT_TOKEN_BY_STATUS = {
 };
 
 let lastPayloadKey = '';
+let currentTurn = null;
+let suppressActiveUntilNextInput = false;
 let lastRuntime = {
   model: process.env.PHONE_AGENT_MODEL || process.env.HERMES_MODEL || 'agnes-2.0-flash',
   provider: process.env.PHONE_AGENT_PROVIDER || process.env.HERMES_PROVIDER || 'agnes',
@@ -70,23 +73,35 @@ function extractRuntime(line) {
 function buildTask(status, updatedAt) {
   const active = ['THINKING', 'WRITING', 'RUNNING', 'NEED_CONFIRM'].includes(status);
   if (active) {
+    if (!currentTurn || !currentTurn.active) {
+      currentTurn = {
+        active: true,
+        startedAt: updatedAt,
+        label: status
+      };
+    } else {
+      currentTurn.label = status;
+    }
     return {
       active: true,
-      startedAt: updatedAt,
+      startedAt: currentTurn.startedAt,
       endedAt: null,
       estimatedDurationSec: status === 'RUNNING' ? 120 : 180,
       label: status
     };
   }
   if (status === 'DONE' || status === 'ERROR') {
+    const startedAt = currentTurn && currentTurn.startedAt ? currentTurn.startedAt : null;
+    currentTurn = null;
     return {
       active: false,
-      startedAt: null,
+      startedAt,
       endedAt: updatedAt,
       estimatedDurationSec: null,
       label: status
     };
   }
+  currentTurn = null;
   return null;
 }
 
@@ -100,12 +115,20 @@ function classifyLine(line) {
 
   const turnMatch = line.match(/agent\.conversation_loop: conversation turn:.*msg='([^']*)'/i);
   if (turnMatch) {
+    suppressActiveUntilNextInput = false;
     return {
       status: 'THINKING',
       detail: 'Hermes 收到新消息：' + trimPreview(turnMatch[1], 36),
       updatedAt,
       runtime
     };
+  }
+
+  const activeLogSignal = /OpenAI client created .*chat_completion_stream_request/i.test(line)
+    || /agent\.conversation_loop: API call #(\d+)/i.test(line)
+    || /agent\.tool_executor: tool ([^ ]+) (completed|failed|returned error)/i.test(line);
+  if (suppressActiveUntilNextInput && activeLogSignal) {
+    return null;
   }
 
   if (/OpenAI client created .*chat_completion_stream_request/i.test(line)) {
@@ -150,6 +173,7 @@ function classifyLine(line) {
   }
 
   if (/agent\.conversation_loop: Turn ended:/i.test(line)) {
+    suppressActiveUntilNextInput = true;
     return {
       status: 'DONE',
       detail: 'Hermes 已完成这一轮回复',
@@ -181,15 +205,25 @@ function classifyLine(line) {
 }
 
 async function shouldYieldToHookState() {
-  if (!hookPriorityMs || hookPriorityMs <= 0) return false;
+  if ((!hookPriorityMs || hookPriorityMs <= 0) && (!terminalPriorityMs || terminalPriorityMs <= 0)) return false;
   try {
     const raw = await fs.promises.readFile(liveStatePath, 'utf8');
     const current = JSON.parse(raw);
     const source = String(current?.runtime?.source || '');
-    if (!source.startsWith('hook/') && source !== 'phone-agent-status/register' && source !== 'gateway/inbound') return false;
+    const status = String(current?.status || '').toUpperCase();
     const updatedAt = Date.parse(current.updatedAt || current.updated_at || current.timestamp || '');
     if (!Number.isFinite(updatedAt)) return false;
-    return Date.now() - updatedAt < hookPriorityMs;
+    const ageMs = Date.now() - updatedAt;
+
+    // A real final hook owns the screen for the same 30-second hold window as the
+    // frontend. Without this, later log lines such as "API call completed" can
+    // regress DONE back to THINKING after the short hook-priority window expires.
+    if ((status === 'DONE' || status === 'ERROR') && source.includes('post_turn')) {
+      return terminalPriorityMs > 0 && ageMs < terminalPriorityMs;
+    }
+
+    if (!source.startsWith('hook/') && source !== 'phone-agent-status/register' && source !== 'gateway/inbound') return false;
+    return hookPriorityMs > 0 && ageMs < hookPriorityMs;
   } catch (error) {
     return false;
   }

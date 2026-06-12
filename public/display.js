@@ -16,17 +16,19 @@ const steps = {
 };
 
 const POLL_INTERVAL_MS = 900;
-const COMPLETE_HOLD_MS = 3 * 60 * 1000;
+const COMPLETE_HOLD_MS = 30 * 1000;
+const COMPLETE_SETTLE_MS = 8 * 1000;
 const ACTIVE_FRESH_MS = 4500;
 
-const ORDER = { IDLE: 0, THINKING: 1, RUNNING: 2, DONE: 3, ERROR: 3 };
-const PROGRESS = { IDLE: '0%', THINKING: '33.333%', RUNNING: '66.666%', DONE: '100%', ERROR: '100%' };
+const ORDER = { IDLE: 0, THINKING: 1, RUNNING: 2, DONE: 3, ERROR: 3, SETTLING: 3 };
+const PROGRESS = { IDLE: '0%', THINKING: '33.333%', RUNNING: '66.666%', DONE: '100%', ERROR: '100%', SETTLING: '100%' };
 const VIEW = {
   IDLE: { tone: '摸鱼中', status: '待机摸鱼', detail: '等你发话。' },
   THINKING: { tone: '想一想', status: '努力思考中', detail: '正在整理思路。' },
   RUNNING: { tone: '开工啦', status: '拼命干活中', detail: '工具正在执行。' },
   DONE: { tone: '搞定', status: '终于完成了', detail: '这一轮处理完了。' },
-  ERROR: { tone: '翻车', status: '出错了', detail: '有东西没跑通。' }
+  ERROR: { tone: '翻车', status: '出错了', detail: '有东西没跑通。' },
+  SETTLING: { tone: '收工', status: '准备摸鱼', detail: '收拾一下，马上回待机。' }
 };
 const SKINS = [
   { id: 'classic', label: '机器人' },
@@ -41,6 +43,8 @@ let eventSource = null;
 let polling = false;
 let phase = 'IDLE';
 let terminalAt = 0;
+let terminalLockedUntil = 0;
+let settlingAt = 0;
 let lastActiveAt = 0;
 let consumedTerminalKey = '';
 let turnStartedAt = 0;
@@ -86,12 +90,21 @@ function stateAgeMs(state) {
   return Date.now() - ts;
 }
 
+function isFreshState(state) {
+  return stateAgeMs(state) <= ACTIVE_FRESH_MS;
+}
+
 function isFreshActive(state) {
-  return state.task?.active === true && stateAgeMs(state) <= ACTIVE_FRESH_MS;
+  return state.task?.active === true && isFreshState(state);
 }
 
 function isFinalSource(source) {
   return source.includes('post_turn') || source.includes('settled') || source.includes('final');
+}
+
+function isFreshTurnStart(state) {
+  const source = String(state.runtime?.source || '').toLowerCase();
+  return isFreshState(state) && (source.includes('gateway/inbound') || source.includes('pre_turn'));
 }
 
 function terminalKey(state) {
@@ -105,13 +118,23 @@ function normalizePhase(state) {
   const source = String(state.runtime?.source || '').toLowerCase();
   const detail = String(state.detail || '').toLowerCase();
   const active = isFreshActive(state);
+  const fresh = isFreshState(state);
 
   const finalSource = isFinalSource(source);
 
-  // Only final hooks may become terminal ERROR/DONE. Tool/log errors during a turn
-  // are implementation noise; the assistant may recover before replying.
-  if (finalSource && (status.includes('ERROR') || source.includes('error') || detail.includes('traceback'))) return 'ERROR';
-  if (finalSource && (status.includes('DONE') || status.includes('COMPLETE'))) return 'DONE';
+  // Final snapshots are allowed only while fresh, or while the current page is
+  // already holding a terminal state. This prevents old DONE/ERROR snapshots from
+  // replaying after browser refreshes.
+  if (finalSource) {
+    if (!fresh && phase === 'IDLE') return 'IDLE';
+    if (status.includes('ERROR') || source.includes('error') || detail.includes('traceback')) return 'ERROR';
+    if (status.includes('DONE') || status.includes('COMPLETE')) return 'DONE';
+  }
+
+  // Old active snapshots must not restart work after a browser refresh. During an
+  // already-started turn we keep the locked phase, but from IDLE stale non-final
+  // hook/log snapshots are ignored.
+  if (!fresh && phase === 'IDLE') return 'IDLE';
 
   if (source.includes('pre_tool') || source.includes('post_tool') || source.includes('tool_call') || detail.includes('tool') || status.includes('ERROR')) return 'RUNNING';
   if (source.includes('llm') || source.includes('api_request') || source.includes('pre_turn') || source.includes('gateway/inbound') || status.includes('THINK') || status.includes('WRITING')) return 'THINKING';
@@ -120,16 +143,23 @@ function normalizePhase(state) {
   return phase === 'THINKING' || phase === 'RUNNING' ? phase : 'IDLE';
 }
 
-function reducePhase(raw, active) {
+function reducePhase(raw, active, state) {
   const now = Date.now();
 
   if (active) lastActiveAt = now;
 
-  // Terminal states are held, then the consumed terminal result returns to idle.
+  // Terminal and settling phases are local-only. Once a real final state is
+  // displayed, backend noise cannot pull the screen back into THINKING/RUNNING.
   if (phase === 'DONE' || phase === 'ERROR') {
-    if (!active && now - terminalAt >= COMPLETE_HOLD_MS) return 'IDLE';
-    if (active && now - terminalAt >= 1200) return raw === 'RUNNING' ? 'RUNNING' : 'THINKING';
+    if (isFreshTurnStart(state)) return 'THINKING';
+    if (now >= terminalLockedUntil) return 'SETTLING';
     return phase;
+  }
+
+  if (phase === 'SETTLING') {
+    if (isFreshTurnStart(state)) return 'THINKING';
+    if (now - settlingAt >= COMPLETE_SETTLE_MS) return 'IDLE';
+    return 'SETTLING';
   }
 
   // Start a locked turn on the first thinking/running signal.
@@ -151,16 +181,28 @@ function reducePhase(raw, active) {
 }
 
 function setPhase(next) {
+  const now = Date.now();
   if (next !== phase && (next === 'DONE' || next === 'ERROR')) {
-    terminalAt = Date.now();
+    terminalAt = now;
+    terminalLockedUntil = now + COMPLETE_HOLD_MS;
+    settlingAt = 0;
     turnStartedAt = 0;
   }
-  if (next === 'IDLE') turnStartedAt = 0;
+  if (next !== phase && next === 'SETTLING') {
+    settlingAt = now;
+    turnStartedAt = 0;
+  }
+  if (next === 'IDLE') {
+    turnStartedAt = 0;
+    terminalAt = 0;
+    terminalLockedUntil = 0;
+    settlingAt = 0;
+  }
   phase = next;
 }
 
 function renderFlow(current) {
-  const visual = current === 'ERROR' ? 'DONE' : current;
+  const visual = current === 'ERROR' || current === 'SETTLING' ? 'DONE' : current;
   flowFillNode.style.width = PROGRESS[current] || '0%';
   Object.entries(steps).forEach(([key, node]) => {
     if (!node) return;
@@ -180,8 +222,8 @@ function render(state) {
     raw = 'IDLE';
   }
 
-  const next = reducePhase(raw, active);
-  if ((phase === 'DONE' || phase === 'ERROR') && next === 'IDLE') {
+  const next = reducePhase(raw, active, state);
+  if ((phase === 'DONE' || phase === 'ERROR' || phase === 'SETTLING') && next === 'IDLE') {
     consumedTerminalKey = terminalKey(state);
   }
   setPhase(next);
@@ -234,7 +276,7 @@ function connectEvents() {
     }
   };
   eventSource.onerror = () => {
-    showOffline();
+    connectionNode.textContent = 'SYNC';
     requestState();
   };
 }
